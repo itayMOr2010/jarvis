@@ -1,7 +1,7 @@
 """
-JARVIS Central Server
----------------------
-Runs on PythonAnywhere (free tier).
+JARVIS Central Server — Gemini Edition
+---------------------------------------
+Runs on Railway (free tier).
 Handles tasks, calendar events, memory, and NLP command parsing.
 All responses are in English; input can be Hebrew, English, or mixed.
 """
@@ -11,16 +11,16 @@ import json
 import os
 import datetime
 import re
+import urllib.request
 
 app = Flask(__name__)
 
-# ── Data files (PythonAnywhere keeps these forever on the free tier) ──────────
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
-TASKS_FILE    = os.path.join(DATA_DIR, "tasks.json")
-EVENTS_FILE   = os.path.join(DATA_DIR, "events.json")
-MEMORY_FILE   = os.path.join(DATA_DIR, "memory.json")
+TASKS_FILE  = os.path.join(DATA_DIR, "tasks.json")
+EVENTS_FILE = os.path.join(DATA_DIR, "events.json")
+MEMORY_FILE = os.path.join(DATA_DIR, "memory.json")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -43,13 +43,27 @@ def today_str():
 def now_str():
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
+# ── Gemini API ────────────────────────────────────────────────────────────────
 
-# ── NLP parser: understands Hebrew + English + mixed ─────────────────────────
-# We call the Anthropic API (claude-sonnet-4-6) so JARVIS can parse any phrase.
+GEMINI_MODEL = "gemini-2.0-flash"
 
-import urllib.request
+def gemini(system: str, user: str) -> str:
+    """Call Gemini and return the text response."""
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={api_key}"
 
-ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+    payload = json.dumps({
+        "system_instruction": {"parts": [{"text": system}]},
+        "contents": [{"parts": [{"text": user}]}],
+        "generationConfig": {"maxOutputTokens": 300, "temperature": 0.7}
+    }).encode("utf-8")
+
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        body = json.loads(resp.read())
+    return body["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+# ── Prompts ───────────────────────────────────────────────────────────────────
 
 SYSTEM_PARSE = """You are a command parser for a personal assistant called JARVIS.
 The user may write in Hebrew, English, or a mix of both (Heblish).
@@ -57,9 +71,7 @@ Parse the user's message and return ONLY a JSON object (no markdown, no explanat
 
 JSON schema:
 {
-  "intent": "<one of: add_task | complete_task | delete_task | list_tasks |
-                        add_event | list_events | delete_event |
-                        remember | recall | status | unknown>",
+  "intent": "<one of: add_task | complete_task | delete_task | list_tasks | add_event | list_events | delete_event | remember | recall | status | unknown>",
   "task_name":   "<string or null>",
   "task_id":     "<integer or null>",
   "event_title": "<string or null>",
@@ -71,42 +83,16 @@ JSON schema:
 }
 
 Examples:
-- "add a task buy groceries"          → intent: add_task, task_name: "buy groceries"
-- "תוסיף משימה לקנות חלב"             → intent: add_task, task_name: "buy milk"  (translate to English)
-- "add for the agenda today פגישה עם הבוס at 9 am" → intent: add_event, event_title: "Meeting with boss", event_date: <today>, event_time: "09:00"
-- "mark task 3 as done"               → intent: complete_task, task_id: 3
-- "what's on the agenda this week"    → intent: list_events, filter: "this_week"
-- "remember that my camp starts July 5" → intent: remember, memory_key: "camp start", memory_value: "July 5"
-- "what do you know about my camp"    → intent: recall, memory_key: "camp"
+- "add a task buy groceries" -> intent: add_task, task_name: "buy groceries"
+- "תוסיף משימה לקנות חלב" -> intent: add_task, task_name: "buy milk"
+- "add for the agenda today פגישה עם הבוס at 9 am" -> intent: add_event, event_title: "Meeting with boss", event_date: <today>, event_time: "09:00"
+- "mark task 3 as done" -> intent: complete_task, task_id: 3
+- "what's on the agenda this week" -> intent: list_events, filter: "this_week"
+- "remember that my camp starts July 5" -> intent: remember, memory_key: "camp start", memory_value: "July 5"
+- "what do you know about my camp" -> intent: recall, memory_key: "camp"
 
-Always translate Hebrew content values (task names, event titles) into English.
+Always translate Hebrew content values into English.
 Today is """ + today_str() + "."
-
-def parse_command(text: str) -> dict:
-    """Send user text to Claude for intent parsing."""
-    payload = json.dumps({
-        "model": "claude-sonnet-4-6",
-        "max_tokens": 300,
-        "system": SYSTEM_PARSE,
-        "messages": [{"role": "user", "content": text}]
-    }).encode("utf-8")
-
-    req = urllib.request.Request(
-        ANTHROPIC_API_URL,
-        data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "x-api-key": os.environ.get("ANTHROPIC_API_KEY", ""),
-            "anthropic-version": "2023-06-01"
-        }
-    )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        body = json.loads(resp.read())
-    raw = body["content"][0]["text"].strip()
-    # Strip any accidental markdown fences
-    raw = re.sub(r"^```json\s*|^```\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
-    return json.loads(raw)
-
 
 SYSTEM_RESPOND = """You are JARVIS, a personal AI assistant.
 Personality: sharp, polite, mildly witty British butler — like Tony Stark's JARVIS.
@@ -115,28 +101,13 @@ Address the user as "sir".
 Never use emojis. Never be sycophantic.
 Today is """ + today_str() + "."
 
+def parse_command(text: str) -> dict:
+    raw = gemini(SYSTEM_PARSE, text)
+    raw = re.sub(r"^```json\s*|^```\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
+    return json.loads(raw)
+
 def jarvis_reply(situation: str) -> str:
-    """Generate a JARVIS-style English reply for the given situation."""
-    payload = json.dumps({
-        "model": "claude-sonnet-4-6",
-        "max_tokens": 150,
-        "system": SYSTEM_RESPOND,
-        "messages": [{"role": "user", "content": situation}]
-    }).encode("utf-8")
-
-    req = urllib.request.Request(
-        ANTHROPIC_API_URL,
-        data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "x-api-key": os.environ.get("ANTHROPIC_API_KEY", ""),
-            "anthropic-version": "2023-06-01"
-        }
-    )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        body = json.loads(resp.read())
-    return body["content"][0]["text"].strip()
-
+    return gemini(SYSTEM_RESPOND, situation)
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
@@ -144,10 +115,8 @@ def jarvis_reply(situation: str) -> str:
 def health():
     return jsonify({"status": "JARVIS online", "time": now_str()})
 
-
 @app.route("/command", methods=["POST"])
 def command():
-    """Main endpoint. Accepts { "text": "..." } and returns { "reply": "..." }."""
     data = request.get_json(force=True)
     text = (data.get("text") or "").strip()
     if not text:
@@ -161,24 +130,22 @@ def command():
     intent = parsed.get("intent", "unknown")
     reply  = ""
 
-    # ── TASKS ─────────────────────────────────────────────
     if intent == "add_task":
         tasks = load(TASKS_FILE)
         name = parsed.get("task_name") or "unnamed task"
         task = {"id": next_id(tasks), "name": name, "done": False, "created": today_str()}
         tasks.append(task)
         save(TASKS_FILE, tasks)
-        situation = f'Task added successfully: "{name}". Give a brief confirmation.'
-        reply = jarvis_reply(situation)
+        reply = jarvis_reply(f'Task added: "{name}". Brief confirmation.')
 
     elif intent == "list_tasks":
         tasks = load(TASKS_FILE)
         pending = [t for t in tasks if not t["done"]]
         if not pending:
-            reply = jarvis_reply("The user has no pending tasks. Say so briefly.")
+            reply = jarvis_reply("No pending tasks. Say so briefly.")
         else:
             names = ", ".join(f'[{t["id"]}] {t["name"]}' for t in pending)
-            reply = jarvis_reply(f"List these pending tasks to the user: {names}")
+            reply = jarvis_reply(f"List these pending tasks: {names}")
 
     elif intent == "complete_task":
         tasks = load(TASKS_FILE)
@@ -188,9 +155,9 @@ def command():
             matched["done"] = True
             matched["completed"] = today_str()
             save(TASKS_FILE, tasks)
-            reply = jarvis_reply(f'Task "{matched["name"]}" marked as complete. Brief confirmation.')
+            reply = jarvis_reply(f'Task "{matched["name"]}" marked complete.')
         else:
-            reply = jarvis_reply(f"Task ID {tid} not found. Say so briefly.")
+            reply = jarvis_reply(f"Task ID {tid} not found.")
 
     elif intent == "delete_task":
         tasks = load(TASKS_FILE)
@@ -198,11 +165,10 @@ def command():
         new_tasks = [t for t in tasks if t["id"] != tid]
         if len(new_tasks) < len(tasks):
             save(TASKS_FILE, new_tasks)
-            reply = jarvis_reply(f"Task {tid} deleted. Brief confirmation.")
+            reply = jarvis_reply(f"Task {tid} deleted.")
         else:
-            reply = jarvis_reply(f"Task ID {tid} not found. Say so.")
+            reply = jarvis_reply(f"Task ID {tid} not found.")
 
-    # ── EVENTS / CALENDAR ─────────────────────────────────
     elif intent == "add_event":
         events = load(EVENTS_FILE)
         title = parsed.get("event_title") or "Untitled event"
@@ -212,13 +178,12 @@ def command():
         events.append(event)
         save(EVENTS_FILE, events)
         when = f"{date} at {time}" if time else date
-        reply = jarvis_reply(f'Event added: "{title}" on {when}. Brief witty confirmation.')
+        reply = jarvis_reply(f'Event added: "{title}" on {when}.')
 
     elif intent == "list_events":
         events = load(EVENTS_FILE)
         f = parsed.get("filter") or "all"
         today = today_str()
-
         if f == "today":
             filtered = [e for e in events if e.get("date") == today]
         elif f == "this_week":
@@ -226,17 +191,15 @@ def command():
             filtered = [e for e in events if today <= e.get("date","") <= week_end]
         else:
             filtered = events
-
         filtered.sort(key=lambda e: (e.get("date",""), e.get("time","")))
-
         if not filtered:
-            reply = jarvis_reply("No events found for the requested period. Say so briefly.")
+            reply = jarvis_reply("No events found.")
         else:
             lines = ", ".join(
                 f'[{e["id"]}] {e["title"]} on {e["date"]}' + (f' at {e["time"]}' if e.get("time") else "")
                 for e in filtered
             )
-            reply = jarvis_reply(f"Read out these upcoming events: {lines}")
+            reply = jarvis_reply(f"Read out these events: {lines}")
 
     elif intent == "delete_event":
         events = load(EVENTS_FILE)
@@ -244,11 +207,10 @@ def command():
         new_events = [e for e in events if e["id"] != eid]
         if len(new_events) < len(events):
             save(EVENTS_FILE, new_events)
-            reply = jarvis_reply(f"Event {eid} removed from the agenda.")
+            reply = jarvis_reply(f"Event {eid} removed.")
         else:
             reply = jarvis_reply(f"Event {eid} not found.")
 
-    # ── MEMORY ────────────────────────────────────────────
     elif intent == "remember":
         memory = load(MEMORY_FILE)
         key   = parsed.get("memory_key","").lower().strip()
@@ -260,7 +222,7 @@ def command():
         else:
             memory.append({"key": key, "value": value, "created": today_str()})
         save(MEMORY_FILE, memory)
-        reply = jarvis_reply(f'I will remember: {key} = {value}. Brief confirmation.')
+        reply = jarvis_reply(f'Remembered: {key} = {value}.')
 
     elif intent == "recall":
         memory = load(MEMORY_FILE)
@@ -268,43 +230,31 @@ def command():
         matches = [m for m in memory if key in m["key"]]
         if matches:
             facts = "; ".join(f'{m["key"]}: {m["value"]}' for m in matches)
-            reply = jarvis_reply(f"Share this memory with the user: {facts}")
+            reply = jarvis_reply(f"Share this memory: {facts}")
         else:
-            reply = jarvis_reply(f"No memory found for '{key}'. Say so briefly.")
+            reply = jarvis_reply(f"No memory found for '{key}'.")
 
-    # ── STATUS ────────────────────────────────────────────
     elif intent == "status":
         tasks  = load(TASKS_FILE)
         events = load(EVENTS_FILE)
         today  = today_str()
-        pending       = sum(1 for t in tasks  if not t["done"])
-        today_events  = sum(1 for e in events if e.get("date") == today)
-        reply = jarvis_reply(
-            f"Give the user a morning briefing: {pending} pending tasks, "
-            f"{today_events} events today ({today}). Be concise and witty."
-        )
+        pending      = sum(1 for t in tasks  if not t["done"])
+        today_events = sum(1 for e in events if e.get("date") == today)
+        reply = jarvis_reply(f"Briefing: {pending} pending tasks, {today_events} events today.")
 
     else:
-        # Unknown intent — let Claude figure out a helpful response
         reply = jarvis_reply(f'The user said: "{text}". Respond helpfully as JARVIS.')
 
     return jsonify({"reply": reply, "intent": intent, "parsed": parsed})
 
-
-# ── Direct data endpoints (for debugging / mobile app) ────────────────────────
-
-@app.route("/tasks", methods=["GET"])
-def get_tasks():
-    return jsonify(load(TASKS_FILE))
+@app.route("/tasks",  methods=["GET"])
+def get_tasks():  return jsonify(load(TASKS_FILE))
 
 @app.route("/events", methods=["GET"])
-def get_events():
-    return jsonify(load(EVENTS_FILE))
+def get_events(): return jsonify(load(EVENTS_FILE))
 
 @app.route("/memory", methods=["GET"])
-def get_memory():
-    return jsonify(load(MEMORY_FILE))
-
+def get_memory(): return jsonify(load(MEMORY_FILE))
 
 if __name__ == "__main__":
     app.run(debug=True)

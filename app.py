@@ -45,7 +45,7 @@ def now_str():
 
 # ── Gemini API ────────────────────────────────────────────────────────────────
 
-GEMINI_MODEL = "gemini-1.5-flash"
+GEMINI_MODEL = "gemini-1.5-flash-latest"
 
 def gemini(system: str, user: str) -> str:
     """Call Gemini and return the text response."""

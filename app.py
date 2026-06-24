@@ -104,6 +104,8 @@ Today is """ + today_str() + "."
 def parse_command(text: str) -> dict:
     raw = gemini(SYSTEM_PARSE, text)
     raw = re.sub(r"^```json\s*|^```\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
+    if not raw:
+        return {"intent": "unknown"}
     return json.loads(raw)
 
 def jarvis_reply(situation: str) -> str:
